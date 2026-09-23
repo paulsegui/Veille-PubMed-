@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import requests
 
-
 PUBMED_QUERY = os.environ.get(
     "PUBMED_QUERY",
     '('
@@ -44,20 +43,25 @@ PUBMED_QUERY = os.environ.get(
     '"intracranial aneurysm"[Title/Abstract] OR '
     '"stroke thrombectomy"[Title/Abstract] OR '
     '"bypass graft"[Title/Abstract]'
+    ') NOT ('
+    '"Case Reports"[Publication Type] OR '
+    '"Comment"[Publication Type] OR '
+    '"Letter"[Publication Type] OR '
+    '"Editorial"[Publication Type] OR '
+    '"News"[Publication Type]'
     ')'
 )
-
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", GMAIL_ADDRESS)
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "3"))
 
-# Plusieurs modeles essayes dans l'ordre : si le premier est sature, on tente le suivant
-GEMINI_MODELS = [
-    os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"),
-    "gemini-2.0-flash-lite",
-    "gemini-flash-latest",
+# Modeles Groq essayes dans l'ordre (tous gratuits, infra separee de Google)
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "qwen/qwen3-32b",
 ]
 
 
@@ -106,25 +110,32 @@ def fetch_details(pmids):
     return articles
 
 
-def call_gemini(model, prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
+def call_groq(model, prompt):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+    }
 
     for attempt in range(3):
         r = requests.post(url, headers=headers, json=body, timeout=60)
         if r.status_code == 200:
             data = r.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            return data["choices"][0]["message"]["content"]
         print(f"[{model}] tentative {attempt+1} echouee, code {r.status_code}: {r.text[:300]}")
         if r.status_code in (503, 429):
-            time.sleep(20 * (attempt + 1))
+            time.sleep(15 * (attempt + 1))
             continue
-        break  # erreur non transitoire (401, 400...), inutile d'insister sur ce modele
+        break
     return None
 
 
-def summarize_with_gemini(articles):
+def summarize_with_ai(articles):
     if not articles:
         return "Aucun nouvel article trouve dans la periode selectionnee.", True
 
@@ -136,20 +147,23 @@ def summarize_with_gemini(articles):
     prompt = (
         "Tu es un assistant qui aide un medecin en radiologie interventionnelle "
         "vasculaire a faire sa veille scientifique. Voici une liste d'articles "
-        "PubMed recents. Pour chaque article pertinent en radiologie "
-        "interventionnelle vasculaire, redige en francais : le titre, un resume "
-        "de 3-4 phrases de l'apport clinique ou scientifique principal, et le "
-        "lien PubMed. Ignore les articles hors-sujet ou de tres faible interet "
-        "clinique. Classe du plus au moins important.\n\n"
+        "PubMed recents. Pour chaque article vraiment pertinent en radiologie "
+        "interventionnelle vasculaire (embolisation, malformations vasculaires, "
+        "PAE, fibromes, varices pelviennes, IRM cardiaque, scanner thoracique, "
+        "agents emboliques), redige en francais : le titre, un resume de 3-4 "
+        "phrases de l'apport clinique ou scientifique principal, et le lien "
+        "PubMed. Sois strict sur la qualite : ignore les articles hors-sujet, "
+        "de tres faible niveau de preuve, ou anecdotiques. Classe du plus au "
+        "moins important. Si un article n'apporte rien de solide, ne le liste "
+        "pas du tout plutot que de le mentionner brievement.\n\n"
         f"Articles :\n{corpus}"
     )
 
-    for model in GEMINI_MODELS:
-        result = call_gemini(model, prompt)
+    for model in GROQ_MODELS:
+        result = call_groq(model, prompt)
         if result:
             return result, True
 
-    # Tous les modeles ont echoue : on renvoie quand meme les articles bruts
     fallback = (
         "Le resume automatique n'a pas pu etre genere (services IA indisponibles). "
         "Voici les articles bruts trouves :\n\n"
@@ -178,7 +192,7 @@ def send_email(summary, nb_articles, ai_ok):
 if __name__ == "__main__":
     pmids = search_pubmed()
     articles = fetch_details(pmids)
-    summary, ai_ok = summarize_with_gemini(articles)
+    summary, ai_ok = summarize_with_ai(articles)
     send_email(summary, len(articles), ai_ok)
     print(f"Termine. {len(articles)} article(s) traite(s). IA utilisee: {ai_ok}")
     
