@@ -45,6 +45,7 @@ PUBMED_QUERY = os.environ.get(
     '"stroke thrombectomy"[Title/Abstract] OR '
     '"bypass graft"[Title/Abstract]'
     ')'
+)
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
