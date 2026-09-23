@@ -18,20 +18,22 @@ PUBMED_QUERY = os.environ.get(
     '"arteriovenous malformation"[Title/Abstract] OR '
     '"sclerotherapy"[Title/Abstract] OR '
     '"embolic agent"[Title/Abstract] OR '
+    '"embolic particle"[Title/Abstract] OR '
     '"venous stenting"[Title/Abstract] OR '
     '"iliofemoral stenting"[Title/Abstract] OR '
+    '"venous recanalization"[Title/Abstract] OR '
+    '"post-thrombotic syndrome"[Title/Abstract] OR '
+    '"deep vein thrombosis"[Title/Abstract] OR '
+    '"pulmonary embolism"[Title/Abstract] OR '
     '"uterine fibroid embolization"[Title/Abstract] OR '
     '"uterine artery embolization"[Title/Abstract] OR '
     '"pelvic congestion syndrome"[Title/Abstract] OR '
     '"pelvic vein embolization"[Title/Abstract] OR '
     '"ovarian vein embolization"[Title/Abstract] OR '
-    '"cardiac MRI"[Title/Abstract] OR '
-    '"cardiac magnetic resonance"[Title/Abstract] OR '
-    '"chest CT"[Title/Abstract] OR '
-    '"thoracic CT"[Title/Abstract] OR '
-    '"agar"[Title/Abstract] OR '
     '"bio-sourced embolic"[Title/Abstract] OR '
     '"biosourced embolic"[Title/Abstract] OR '
+    '("cardiac MRI"[Title/Abstract] AND ("vascular"[Title/Abstract] OR "embolization"[Title/Abstract] OR "radiomics"[Title/Abstract])) OR '
+    '("chest CT"[Title/Abstract] AND ("embolization"[Title/Abstract] OR "vascular"[Title/Abstract] OR "pulmonary embolism"[Title/Abstract])) OR '
     '("radiomics"[Title/Abstract] AND "embolization"[Title/Abstract])'
     ') NOT ('
     '"aortic aneurysm"[Title/Abstract] OR '
@@ -51,6 +53,7 @@ PUBMED_QUERY = os.environ.get(
     '"News"[Publication Type]'
     ')'
 )
+
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
@@ -60,9 +63,12 @@ DAYS_BACK = int(os.environ.get("DAYS_BACK", "3"))
 # Modeles Groq essayes dans l'ordre (tous gratuits, infra separee de Google)
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
-    "llama-3.3-70b-versatile",
-    "qwen/qwen3-32b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
 ]
+
+# Nombre d'articles envoyes par appel IA (pour rester sous la limite de tokens/minute du compte gratuit)
+BATCH_SIZE = 6
 
 
 def search_pubmed():
@@ -135,86 +141,106 @@ def call_groq(model, prompt):
     return None
 
 
-def summarize_with_ai(articles):
-    if not articles:
-        return "Aucun nouvel article trouve dans la periode selectionnee.", True
+PROMPT_INSTRUCTIONS = (
+    "Tu es mon assistant personnel de veille scientifique.\n\n"
+    "Je suis radiologue interventionnel avec un interet particulier\n"
+    "pour la radiologie interventionnelle vasculaire et les techniques\n"
+    "d'embolisation.\n\n"
+    "Ta mission est de filtrer les nouveaux articles scientifiques\n"
+    "ci-dessous.\n\n"
+    "NE RETIENS QUE les articles reellement utiles ou importants.\n\n"
+    "Priorite aux :\n\n"
+    "1. essais randomises\n"
+    "2. etudes prospectives importantes\n"
+    "3. grandes series multicentriques\n"
+    "4. meta-analyses\n"
+    "5. recommandations / guidelines\n"
+    "6. innovations techniques importantes\n"
+    "7. comparaisons de techniques\n"
+    "8. resultats pouvant modifier la pratique\n"
+    "9. articles particulierement pertinents pour la RI vasculaire\n"
+    "10. articles pouvant generer une idee de recherche\n\n"
+    "Sois particulierement attentif a :\n\n"
+    "- embolisation\n"
+    "- agents emboliques\n"
+    "- particules\n"
+    "- coils\n"
+    "- plugs\n"
+    "- PAE\n"
+    "- UAE\n"
+    "- hemorragie\n"
+    "- thrombectomie\n"
+    "- DVT\n"
+    "- embolie pulmonaire\n"
+    "- maladie veineuse\n"
+    "- syndrome post-thrombotique\n"
+    "- stents veineux\n"
+    "- recanalisation\n"
+    "- sharp recanalization\n\n"
+    "Ne selectionne PAS simplement un article parce qu'il contient\n"
+    "les mots \"interventional radiology\".\n\n"
+    "Pour chaque article retenu :\n\n"
+    "- explique en 2-3 phrases pourquoi il est important\n"
+    "- resume la question etudiee\n"
+    "- donne la population\n"
+    "- donne la methode\n"
+    "- donne les resultats principaux\n"
+    "- donne les limites importantes\n"
+    "- explique ce que cela pourrait changer en pratique\n"
+    "- indique si cela peut inspirer une etude / publication\n\n"
+    "Classe les articles en :\n\n"
+    "\U0001F525 A LIRE\n"
+    "\U0001F7E0 INTERESSANT\n"
+    "\U0001F4A1 IDEE DE RECHERCHE\n\n"
+    "Si aucun article n'est reellement important, dis-le clairement.\n\n"
+    "NE FABRIQUE AUCUNE information absente de l'abstract.\n\n"
+    "Utilise uniquement les informations fournies.\n\n"
+)
 
+
+def chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def summarize_batch(batch):
     corpus = "\n\n".join(
         f"Titre: {a['title']}\nJournal: {a['journal']}\nResume: {a['abstract']}\nLien: {a['url']}"
-        for a in articles
+        for a in batch
     )
-
-    prompt = (
-        "Tu es mon assistant personnel de veille scientifique.\n\n"
-        "Je suis radiologue interventionnel avec un interet particulier\n"
-        "pour la radiologie interventionnelle vasculaire et les techniques\n"
-        "d'embolisation.\n\n"
-        "Ta mission est de filtrer les nouveaux articles scientifiques\n"
-        "ci-dessous.\n\n"
-        "NE RETIENS QUE les articles reellement utiles ou importants.\n\n"
-        "Priorite aux :\n\n"
-        "1. essais randomises\n"
-        "2. etudes prospectives importantes\n"
-        "3. grandes series multicentriques\n"
-        "4. meta-analyses\n"
-        "5. recommandations / guidelines\n"
-        "6. innovations techniques importantes\n"
-        "7. comparaisons de techniques\n"
-        "8. resultats pouvant modifier la pratique\n"
-        "9. articles particulierement pertinents pour la RI vasculaire\n"
-        "10. articles pouvant generer une idee de recherche\n\n"
-        "Sois particulierement attentif a :\n\n"
-        "- embolisation\n"
-        "- agents emboliques\n"
-        "- particules\n"
-        "- coils\n"
-        "- plugs\n"
-        "- PAE\n"
-        "- UAE\n"
-        "- hemorragie\n"
-        "- thrombectomie\n"
-        "- DVT\n"
-        "- embolie pulmonaire\n"
-        "- maladie veineuse\n"
-        "- syndrome post-thrombotique\n"
-        "- stents veineux\n"
-        "- recanalisation\n"
-        "- sharp recanalization\n\n"
-        "Ne selectionne PAS simplement un article parce qu'il contient\n"
-        "les mots \"interventional radiology\".\n\n"
-        "Pour chaque article retenu :\n\n"
-        "- explique en 2-3 phrases pourquoi il est important\n"
-        "- resume la question etudiee\n"
-        "- donne la population\n"
-        "- donne la methode\n"
-        "- donne les resultats principaux\n"
-        "- donne les limites importantes\n"
-        "- explique ce que cela pourrait changer en pratique\n"
-        "- indique si cela peut inspirer une etude / publication\n\n"
-        "Classe les articles en :\n\n"
-        "\U0001F525 A LIRE\n"
-        "\U0001F7E0 INTERESSANT\n"
-        "\U0001F4A1 IDEE DE RECHERCHE\n\n"
-        "Si aucun article n'est reellement important, dis-le clairement.\n\n"
-        "NE FABRIQUE AUCUNE information absente de l'abstract.\n\n"
-        "Utilise uniquement les informations fournies.\n\n"
-        f"Articles :\n{corpus}"
-    )
+    prompt = PROMPT_INSTRUCTIONS + f"Articles :\n{corpus}"
 
     for model in GROQ_MODELS:
         result = call_groq(model, prompt)
         if result:
-            return result, True
+            return result
+    return None
 
-    fallback = (
-        "Le resume automatique n'a pas pu etre genere (services IA indisponibles). "
-        "Voici les articles bruts trouves :\n\n"
-    )
-    fallback += "\n\n".join(
-        f"- {a['title']} ({a['journal']})\n  {a['url']}"
-        for a in articles
-    )
-    return fallback, False
+
+def summarize_with_ai(articles):
+    if not articles:
+        return "Aucun nouvel article trouve dans la periode selectionnee.", True
+
+    batches = list(chunked(articles, BATCH_SIZE))
+    results = []
+    any_success = False
+
+    for idx, batch in enumerate(batches):
+        result = summarize_batch(batch)
+        if result:
+            any_success = True
+            results.append(result)
+        else:
+            # Secours pour ce lot uniquement : articles bruts de ce lot
+            raw = "\n\n".join(
+                f"- {a['title']} ({a['journal']})\n  {a['url']}" for a in batch
+            )
+            results.append(f"[Resume IA indisponible pour ce lot, articles bruts]\n\n{raw}")
+        if idx < len(batches) - 1:
+            time.sleep(3)  # respecte la limite de requetes/minute entre les lots
+
+    summary = "\n\n---\n\n".join(results)
+    return summary, any_success
 
 
 def send_email(summary, nb_articles, ai_ok):
@@ -237,4 +263,4 @@ if __name__ == "__main__":
     summary, ai_ok = summarize_with_ai(articles)
     send_email(summary, len(articles), ai_ok)
     print(f"Termine. {len(articles)} article(s) traite(s). IA utilisee: {ai_ok}")
-    
+            
