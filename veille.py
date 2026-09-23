@@ -7,12 +7,45 @@ from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import requests
 
+
 PUBMED_QUERY = os.environ.get(
     "PUBMED_QUERY",
-    '("interventional radiology"[Title/Abstract] OR "embolization"[Title/Abstract] '
-    'OR "endovascular"[Title/Abstract] OR "vascular malformation"[Title/Abstract] '
-    'OR "chemoembolization"[Title/Abstract] OR "prostatic artery embolization"[Title/Abstract])'
-)
+    '('
+    '"Embolization, Therapeutic"[Mesh] OR '
+    '"prostatic artery embolization"[Title/Abstract] OR '
+    '"chemoembolization"[Title/Abstract] OR '
+    '"transarterial embolization"[Title/Abstract] OR '
+    '"vascular malformation"[Title/Abstract] OR '
+    '"arteriovenous malformation"[Title/Abstract] OR '
+    '"sclerotherapy"[Title/Abstract] OR '
+    '"embolic agent"[Title/Abstract] OR '
+    '"venous stenting"[Title/Abstract] OR '
+    '"iliofemoral stenting"[Title/Abstract] OR '
+    '"uterine fibroid embolization"[Title/Abstract] OR '
+    '"uterine artery embolization"[Title/Abstract] OR '
+    '"pelvic congestion syndrome"[Title/Abstract] OR '
+    '"pelvic vein embolization"[Title/Abstract] OR '
+    '"ovarian vein embolization"[Title/Abstract] OR '
+    '"cardiac MRI"[Title/Abstract] OR '
+    '"cardiac magnetic resonance"[Title/Abstract] OR '
+    '"chest CT"[Title/Abstract] OR '
+    '"thoracic CT"[Title/Abstract] OR '
+    '"agar"[Title/Abstract] OR '
+    '"bio-sourced embolic"[Title/Abstract] OR '
+    '"biosourced embolic"[Title/Abstract] OR '
+    '("radiomics"[Title/Abstract] AND "embolization"[Title/Abstract])'
+    ') NOT ('
+    '"aortic aneurysm"[Title/Abstract] OR '
+    '"aortic dissection"[Title/Abstract] OR '
+    '"carotid endarterectomy"[Title/Abstract] OR '
+    '"cardiac surgery"[Title/Abstract] OR '
+    '"neurointervention"[Title/Abstract] OR '
+    '"neuroradiology"[Title/Abstract] OR '
+    '"intracranial aneurysm"[Title/Abstract] OR '
+    '"stroke thrombectomy"[Title/Abstract] OR '
+    '"bypass graft"[Title/Abstract]'
+    ')'
+
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
