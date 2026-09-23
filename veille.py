@@ -5,6 +5,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import requests
+import time
 
 PUBMED_QUERY = os.environ.get(
     "PUBMED_QUERY",
@@ -87,10 +88,24 @@ def summarize_with_gemini(articles):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
     body = {"contents": [{"parts": [{"text": prompt}]}]}
-    r = requests.post(url, headers=headers, json=body, timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    last_error = None
+    for attempt in range(4):
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=60)
+            if r.status_code in (503, 429):
+                wait = 15 * (attempt + 1)
+                print(f"Serveur surcharge (code {r.status_code}), nouvelle tentative dans {wait}s...")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            time.sleep(10)
+
+    raise RuntimeError(f"Echec apres plusieurs tentatives: {last_error}")
 
 
 def send_email(summary, nb_articles):
