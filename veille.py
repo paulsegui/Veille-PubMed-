@@ -64,7 +64,6 @@ def fetch_details(pmids):
         })
     return articles
 
-
 def summarize_with_gemini(articles):
     if not articles:
         return "Aucun nouvel article trouve dans la periode selectionnee."
@@ -89,24 +88,18 @@ def summarize_with_gemini(articles):
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
     body = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    last_error = None
     for attempt in range(4):
-        try:
-            r = requests.post(url, headers=headers, json=body, timeout=60)
-            if r.status_code in (503, 429):
-                wait = 15 * (attempt + 1)
-                print(f"Serveur surcharge (code {r.status_code}), nouvelle tentative dans {wait}s...")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
+        r = requests.post(url, headers=headers, json=body, timeout=60)
+        if r.status_code == 200:
             data = r.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
-        except requests.exceptions.RequestException as e:
-            last_error = e
-            time.sleep(10)
+        print(f"Tentative {attempt+1} echouee, code {r.status_code}: {r.text[:500]}")
+        if r.status_code in (503, 429):
+            time.sleep(15 * (attempt + 1))
+            continue
+        r.raise_for_status()
 
-    raise RuntimeError(f"Echec apres plusieurs tentatives: {last_error}")
-
+    raise RuntimeError("Echec apres 4 tentatives, voir les messages ci-dessus")
 
 def send_email(summary, nb_articles):
     msg = MIMEMultipart()
