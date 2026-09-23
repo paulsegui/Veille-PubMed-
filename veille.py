@@ -1,11 +1,11 @@
 import os
+import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import requests
-import time
 
 PUBMED_QUERY = os.environ.get(
     "PUBMED_QUERY",
@@ -18,7 +18,14 @@ GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", GMAIL_ADDRESS)
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "3"))
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+
+# Plusieurs modeles essayes dans l'ordre : si le premier est sature, on tente le suivant
+GEMINI_MODELS = [
+    os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+    "gemini-2.0-flash-lite",
+    "gemini-flash-latest",
+]
+
 
 def search_pubmed():
     date_max = datetime.utcnow().strftime("%Y/%m/%d")
@@ -64,9 +71,28 @@ def fetch_details(pmids):
         })
     return articles
 
+
+def call_gemini(model, prompt):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    body = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    for attempt in range(3):
+        r = requests.post(url, headers=headers, json=body, timeout=60)
+        if r.status_code == 200:
+            data = r.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        print(f"[{model}] tentative {attempt+1} echouee, code {r.status_code}: {r.text[:300]}")
+        if r.status_code in (503, 429):
+            time.sleep(20 * (attempt + 1))
+            continue
+        break  # erreur non transitoire (401, 400...), inutile d'insister sur ce modele
+    return None
+
+
 def summarize_with_gemini(articles):
     if not articles:
-        return "Aucun nouvel article trouve dans la periode selectionnee."
+        return "Aucun nouvel article trouve dans la periode selectionnee.", True
 
     corpus = "\n\n".join(
         f"Titre: {a['title']}\nJournal: {a['journal']}\nResume: {a['abstract']}\nLien: {a['url']}"
@@ -84,29 +110,30 @@ def summarize_with_gemini(articles):
         f"Articles :\n{corpus}"
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
+    for model in GEMINI_MODELS:
+        result = call_gemini(model, prompt)
+        if result:
+            return result, True
 
-    for attempt in range(4):
-        r = requests.post(url, headers=headers, json=body, timeout=60)
-        if r.status_code == 200:
-            data = r.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        print(f"Tentative {attempt+1} echouee, code {r.status_code}: {r.text[:500]}")
-        if r.status_code in (503, 429):
-            time.sleep(15 * (attempt + 1))
-            continue
-        r.raise_for_status()
+    # Tous les modeles ont echoue : on renvoie quand meme les articles bruts
+    fallback = (
+        "Le resume automatique n'a pas pu etre genere (services IA indisponibles). "
+        "Voici les articles bruts trouves :\n\n"
+    )
+    fallback += "\n\n".join(
+        f"- {a['title']} ({a['journal']})\n  {a['url']}"
+        for a in articles
+    )
+    return fallback, False
 
-    raise RuntimeError("Echec apres 4 tentatives, voir les messages ci-dessus")
 
-def send_email(summary, nb_articles):
+def send_email(summary, nb_articles, ai_ok):
     msg = MIMEMultipart()
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = RECIPIENT_EMAIL
     date_str = datetime.utcnow().strftime("%d/%m/%Y")
-    msg["Subject"] = f"Veille radiologie interventionnelle - {nb_articles} article(s) - {date_str}"
+    tag = "" if ai_ok else " [resume brut]"
+    msg["Subject"] = f"Veille radiologie interventionnelle - {nb_articles} article(s) - {date_str}{tag}"
     msg.attach(MIMEText(summary, "plain", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -117,6 +144,7 @@ def send_email(summary, nb_articles):
 if __name__ == "__main__":
     pmids = search_pubmed()
     articles = fetch_details(pmids)
-    summary = summarize_with_gemini(articles)
-    send_email(summary, len(articles))
-    print(f"Termine. {len(articles)} article(s) traite(s).")
+    summary, ai_ok = summarize_with_gemini(articles)
+    send_email(summary, len(articles), ai_ok)
+    print(f"Termine. {len(articles)} article(s) traite(s). IA utilisee: {ai_ok}")
+    
