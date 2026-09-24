@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import smtplib
 from email.mime.text import MIMEText
@@ -53,14 +54,12 @@ PUBMED_QUERY = os.environ.get(
     '"News"[Publication Type]'
     ')'
 )
-
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", GMAIL_ADDRESS)
 DAYS_BACK = int(os.environ.get("DAYS_BACK", "3"))
 
-# Modeles Groq essayes dans l'ordre (tous gratuits, infra separee de Google)
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -69,6 +68,8 @@ GROQ_MODELS = [
 
 # Nombre d'articles envoyes par appel IA (pour rester sous la limite de tokens/minute du compte gratuit)
 BATCH_SIZE = 6
+# Delai de base entre deux lots, pour laisser le quota TPM se recharger
+BASE_DELAY_BETWEEN_BATCHES = 25
 
 
 def search_pubmed():
@@ -116,6 +117,14 @@ def fetch_details(pmids):
     return articles
 
 
+def parse_retry_after(error_text):
+    """Extrait le delai suggere par Groq dans le message d'erreur (ex: 'try again in 21.285s')."""
+    match = re.search(r"try again in ([\d.]+)s", error_text)
+    if match:
+        return float(match.group(1)) + 2  # petite marge de securite
+    return None
+
+
 def call_groq(model, prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -135,20 +144,54 @@ def call_groq(model, prompt):
             return data["choices"][0]["message"]["content"]
         print(f"[{model}] tentative {attempt+1} echouee, code {r.status_code}: {r.text[:300]}")
         if r.status_code in (503, 429):
-            time.sleep(15 * (attempt + 1))
+            wait = parse_retry_after(r.text) or (15 * (attempt + 1))
+            time.sleep(wait)
             continue
         break
     return None
 
+
+# Contexte personnel : decrit qui je suis et mes projets de recherche actuels,
+# pour que l'IA priorise selon ma pratique reelle et pas seulement des mots-cles.
+PROFILE_CONTEXT = (
+    "CONTEXTE ME CONCERNANT (a utiliser pour juger la pertinence, en plus des criteres ci-dessous) :\n\n"
+    "Je suis medecin junior (docteur junior) en radiologie interventionnelle "
+    "vasculaire au CHU de Montpellier, en parcours hospitalo-universitaire. "
+    "Mes projets de recherche actuels sont :\n"
+    "- Radiomique IRM appliquee a la prediction de reponse a l'embolisation "
+    "de prostate (PAE) : tout article sur la radiomique/IRM predictive en "
+    "embolisation ou en uro-radiologie interventionnelle m'interesse "
+    "particulierement.\n"
+    "- Developpement d'un agent d'embolisation particulaire bio-source a base "
+    "d'agar-agar (projet Embobio, dans le cadre d'un Master 2 et d'un stage de "
+    "recherche a Marseille/CERIMED) : tout article sur les nouveaux agents "
+    "emboliques, biomateriaux, particules bio-sourcees ou alternatives aux "
+    "particules calibrees classiques est tres pertinent.\n"
+    "- Manuscrits en cours sur le syndrome de FAVA et les malformations "
+    "vasculaires a bas debit (registre BAMARA), notamment la sclerotherapie "
+    "et la dissociation IRM-clinique post-traitement : tout article sur ces "
+    "sujets est tres pertinent.\n"
+    "- Publication anterieure sur la courbe d'apprentissage du stenting "
+    "iliofemoral : les articles sur le stenting veineux, la recanalisation "
+    "veineuse et le syndrome post-thrombotique m'interessent directement.\n\n"
+    "Utilise ce contexte pour hausser la priorite des articles qui recoupent "
+    "precisement ces projets (meme s'ils semblent nicher), et pour degrader "
+    "la priorite d'articles qui ne font que mentionner des mots-cles generaux "
+    "sans lien avec ma pratique reelle.\n\n"
+)
 
 PROMPT_INSTRUCTIONS = (
     "Tu es mon assistant personnel de veille scientifique.\n\n"
     "Je suis radiologue interventionnel avec un interet particulier\n"
     "pour la radiologie interventionnelle vasculaire et les techniques\n"
     "d'embolisation.\n\n"
+    + PROFILE_CONTEXT +
     "Ta mission est de filtrer les nouveaux articles scientifiques\n"
     "ci-dessous.\n\n"
-    "NE RETIENS QUE les articles reellement utiles ou importants.\n\n"
+    "NE RETIENS QUE les articles reellement utiles ou importants. Les\n"
+    "articles hors-sujet ou sans rapport avec ma pratique ne doivent meme\n"
+    "pas etre mentionnes (ni titre, ni raison de rejet) : ignore-les\n"
+    "completement et silencieusement.\n\n"
     "Priorite aux :\n\n"
     "1. essais randomises\n"
     "2. etudes prospectives importantes\n"
@@ -179,22 +222,47 @@ PROMPT_INSTRUCTIONS = (
     "- sharp recanalization\n\n"
     "Ne selectionne PAS simplement un article parce qu'il contient\n"
     "les mots \"interventional radiology\".\n\n"
-    "Pour chaque article retenu :\n\n"
-    "- explique en 2-3 phrases pourquoi il est important\n"
-    "- resume la question etudiee\n"
-    "- donne la population\n"
-    "- donne la methode\n"
-    "- donne les resultats principaux\n"
-    "- donne les limites importantes\n"
-    "- explique ce que cela pourrait changer en pratique\n"
-    "- indique si cela peut inspirer une etude / publication\n\n"
+    "IMPORTANT - niveau de detail selon la categorie :\n\n"
+    "Pour les articles classes \U0001F525 A LIRE uniquement, donne le detail\n"
+    "complet :\n"
+    "- pourquoi il est important (2-3 phrases)\n"
+    "- question etudiee, population, methode, resultats principaux\n"
+    "- limites importantes\n"
+    "- ce que cela pourrait changer en pratique\n"
+    "- si cela peut inspirer une etude / publication\n\n"
+    "Pour les articles classes \U0001F7E0 INTERESSANT, donne SEULEMENT 2 a 3\n"
+    "phrases maximum : le resultat principal et pourquoi ca vaut le coup\n"
+    "d'y jeter un oeil, rien de plus (pas de section population/methode\n"
+    "detaillee).\n\n"
+    "Pour les articles classes \U0001F4A1 IDEE DE RECHERCHE, donne SEULEMENT\n"
+    "1 a 2 phrases : le lien avec une idee de recherche possible, sans\n"
+    "detailler l'etude elle-meme.\n\n"
     "Classe les articles en :\n\n"
     "\U0001F525 A LIRE\n"
     "\U0001F7E0 INTERESSANT\n"
     "\U0001F4A1 IDEE DE RECHERCHE\n\n"
-    "Si aucun article n'est reellement important, dis-le clairement.\n\n"
+    "Si aucun article n'est reellement important dans ce lot, ecris juste\n"
+    "'Rien de notable dans ce lot.' sans autre commentaire.\n\n"
     "NE FABRIQUE AUCUNE information absente de l'abstract.\n\n"
     "Utilise uniquement les informations fournies.\n\n"
+)
+
+CONSOLIDATION_INSTRUCTIONS = (
+    "Voici plusieurs analyses partielles d'articles scientifiques, produites\n"
+    "lot par lot (le meme prompt de filtrage a ete applique a chaque lot).\n"
+    "Fusionne-les en UN SEUL document final propre et non redondant :\n\n"
+    "- Regroupe tous les articles \U0001F525 A LIRE ensemble en premier (avec\n"
+    "  le detail complet, sans le raccourcir davantage)\n"
+    "- Puis tous les \U0001F7E0 INTERESSANT ensemble (garde le format court)\n"
+    "- Puis tous les \U0001F4A1 IDEE DE RECHERCHE ensemble (garde le format tres court)\n"
+    "- Supprime toute phrase du type 'rien de notable dans ce lot' ou toute\n"
+    "  reference aux lots eux-memes : le lecteur ne doit jamais savoir que\n"
+    "  le traitement a ete fait par petits paquets\n"
+    "- Ne reformule pas le contenu deja ecrit, contente-toi de reorganiser et\n"
+    "  de nettoyer\n"
+    "- Si absolument aucun article n'a ete retenu dans aucun lot, dis-le en\n"
+    "  une seule phrase claire\n\n"
+    "Analyses partielles a fusionner :\n\n"
 )
 
 
@@ -217,6 +285,18 @@ def summarize_batch(batch):
     return None
 
 
+def consolidate(batch_results):
+    joined = "\n\n===LOT SUIVANT===\n\n".join(batch_results)
+    prompt = CONSOLIDATION_INSTRUCTIONS + joined
+
+    for model in GROQ_MODELS:
+        result = call_groq(model, prompt)
+        if result:
+            return result
+    # Si la consolidation echoue, on renvoie les lots bruts plutot que rien
+    return joined
+
+
 def summarize_with_ai(articles):
     if not articles:
         return "Aucun nouvel article trouve dans la periode selectionnee.", True
@@ -231,16 +311,26 @@ def summarize_with_ai(articles):
             any_success = True
             results.append(result)
         else:
-            # Secours pour ce lot uniquement : articles bruts de ce lot
             raw = "\n\n".join(
                 f"- {a['title']} ({a['journal']})\n  {a['url']}" for a in batch
             )
             results.append(f"[Resume IA indisponible pour ce lot, articles bruts]\n\n{raw}")
         if idx < len(batches) - 1:
-            time.sleep(3)  # respecte la limite de requetes/minute entre les lots
+            time.sleep(BASE_DELAY_BETWEEN_BATCHES)
 
-    summary = "\n\n---\n\n".join(results)
-    return summary, any_success
+    if not any_success:
+        raw = "\n\n".join(
+            f"- {a['title']} ({a['journal']})\n  {a['url']}" for a in articles
+        )
+        return f"Le resume automatique n'a pas pu etre genere. Articles bruts :\n\n{raw}", False
+
+    if len(results) > 1:
+        time.sleep(BASE_DELAY_BETWEEN_BATCHES)
+        final = consolidate(results)
+    else:
+        final = results[0]
+
+    return final, any_success
 
 
 def send_email(summary, nb_articles, ai_ok):
@@ -263,4 +353,3 @@ if __name__ == "__main__":
     summary, ai_ok = summarize_with_ai(articles)
     send_email(summary, len(articles), ai_ok)
     print(f"Termine. {len(articles)} article(s) traite(s). IA utilisee: {ai_ok}")
-            
