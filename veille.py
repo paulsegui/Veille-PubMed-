@@ -15,9 +15,6 @@ PUBMED_QUERY = os.environ.get(
     '"prostatic artery embolization"[Title/Abstract] OR '
     '"chemoembolization"[Title/Abstract] OR '
     '"transarterial embolization"[Title/Abstract] OR '
-    '"vascular malformation"[Title/Abstract] OR '
-    '"arteriovenous malformation"[Title/Abstract] OR '
-    '"sclerotherapy"[Title/Abstract] OR '
     '"embolic agent"[Title/Abstract] OR '
     '"embolic particle"[Title/Abstract] OR '
     '"venous stenting"[Title/Abstract] OR '
@@ -35,7 +32,13 @@ PUBMED_QUERY = os.environ.get(
     '"biosourced embolic"[Title/Abstract] OR '
     '("cardiac MRI"[Title/Abstract] AND ("vascular"[Title/Abstract] OR "embolization"[Title/Abstract] OR "radiomics"[Title/Abstract])) OR '
     '("chest CT"[Title/Abstract] AND ("embolization"[Title/Abstract] OR "vascular"[Title/Abstract] OR "pulmonary embolism"[Title/Abstract])) OR '
-    '("radiomics"[Title/Abstract] AND "embolization"[Title/Abstract])'
+    '("radiomics"[Title/Abstract] AND "embolization"[Title/Abstract]) OR '
+    '"Frandon"[Author] OR '
+    '"Sapoval"[Author] OR '
+    '"Bommart"[Author] OR '
+    '"Guiu"[Author] OR '
+    '"CERIMED"[Affiliation] OR '
+    '"LIIE"[Affiliation]'
     ') NOT ('
     '"aortic aneurysm"[Title/Abstract] OR '
     '"aortic dissection"[Title/Abstract] OR '
@@ -250,18 +253,42 @@ PROMPT_INSTRUCTIONS = (
 CONSOLIDATION_INSTRUCTIONS = (
     "Voici plusieurs analyses partielles d'articles scientifiques, produites\n"
     "lot par lot (le meme prompt de filtrage a ete applique a chaque lot).\n"
-    "Fusionne-les en UN SEUL document final propre et non redondant :\n\n"
-    "- Regroupe tous les articles \U0001F525 A LIRE ensemble en premier (avec\n"
-    "  le detail complet, sans le raccourcir davantage)\n"
+    "Fusionne-les en UN SEUL document final au format HTML, propre et non\n"
+    "redondant.\n\n"
+    "FORMAT DE SORTIE OBLIGATOIRE :\n"
+    "- Reponds UNIQUEMENT avec du HTML (pas de markdown, pas de ```html,\n"
+    "  pas de texte avant/apres) ; ne mets PAS de balises <html>, <head> ou\n"
+    "  <body>, seulement le contenu interne (des <h2>, <h3>, <p>, <a>, etc.)\n"
+    "- Titre de section pour les articles a lire : "
+    "<h2 style=\"color:#c0392b;border-bottom:2px solid #c0392b;"
+    "padding-bottom:4px;\">\U0001F525 A LIRE</h2>\n"
+    "- Titre de section pour les articles interessants : "
+    "<h2 style=\"color:#e67e22;border-bottom:2px solid #e67e22;"
+    "padding-bottom:4px;\">\U0001F7E0 INTERESSANT</h2>\n"
+    "- Titre de section pour les idees de recherche : "
+    "<h2 style=\"color:#2980b9;border-bottom:2px solid #2980b9;"
+    "padding-bottom:4px;\">\U0001F4A1 IDEE DE RECHERCHE</h2>\n"
+    "- N'affiche une section que si elle contient au moins un article\n"
+    "- Pour chaque article : <h3 style=\"margin-bottom:2px;\">Titre de "
+    "l'article</h3>, puis <p style=\"margin-top:2px;color:#555;font-style:"
+    "italic;\">Nom du journal</p>, puis le texte d'analyse dans un ou "
+    "plusieurs <p>, puis <p><a href=\"LIEN_PUBMED\" style=\"color:#2980b9;\">"
+    "Voir sur PubMed</a></p>\n"
+    "- Separe chaque article par <hr style=\"border:none;border-top:1px "
+    "solid #ddd;margin:16px 0;\">\n\n"
+    "REGLES DE CONTENU :\n"
+    "- Regroupe tous les articles \U0001F525 A LIRE ensemble en premier "
+    "(avec le detail complet, sans le raccourcir davantage)\n"
     "- Puis tous les \U0001F7E0 INTERESSANT ensemble (garde le format court)\n"
-    "- Puis tous les \U0001F4A1 IDEE DE RECHERCHE ensemble (garde le format tres court)\n"
+    "- Puis tous les \U0001F4A1 IDEE DE RECHERCHE ensemble (garde le format "
+    "tres court)\n"
     "- Supprime toute phrase du type 'rien de notable dans ce lot' ou toute\n"
     "  reference aux lots eux-memes : le lecteur ne doit jamais savoir que\n"
     "  le traitement a ete fait par petits paquets\n"
-    "- Ne reformule pas le contenu deja ecrit, contente-toi de reorganiser et\n"
-    "  de nettoyer\n"
-    "- Si absolument aucun article n'a ete retenu dans aucun lot, dis-le en\n"
-    "  une seule phrase claire\n\n"
+    "- Ne reformule pas le contenu deja ecrit, contente-toi de reorganiser, "
+    "nettoyer et mettre en forme en HTML\n"
+    "- Si absolument aucun article n'a ete retenu dans aucun lot, reponds "
+    "juste avec <p>Aucun article notable dans cette periode.</p>\n\n"
     "Analyses partielles a fusionner :\n\n"
 )
 
@@ -299,7 +326,7 @@ def consolidate(batch_results):
 
 def summarize_with_ai(articles):
     if not articles:
-        return "Aucun nouvel article trouve dans la periode selectionnee.", True
+        return "<p>Aucun nouvel article trouve dans la periode selectionnee.</p>", True
 
     batches = list(chunked(articles, BATCH_SIZE))
     results = []
@@ -319,28 +346,47 @@ def summarize_with_ai(articles):
             time.sleep(BASE_DELAY_BETWEEN_BATCHES)
 
     if not any_success:
-        raw = "\n\n".join(
-            f"- {a['title']} ({a['journal']})\n  {a['url']}" for a in articles
+        items = "".join(
+            f'<li><b>{a["title"]}</b> ({a["journal"]}) - '
+            f'<a href="{a["url"]}">Voir sur PubMed</a></li>'
+            for a in articles
         )
-        return f"Le resume automatique n'a pas pu etre genere. Articles bruts :\n\n{raw}", False
+        html = (
+            "<p>Le resume automatique n'a pas pu etre genere "
+            "(services IA indisponibles). Voici les articles bruts trouves :</p>"
+            f"<ul>{items}</ul>"
+        )
+        return html, False
 
-    if len(results) > 1:
-        time.sleep(BASE_DELAY_BETWEEN_BATCHES)
-        final = consolidate(results)
-    else:
-        final = results[0]
+    time.sleep(BASE_DELAY_BETWEEN_BATCHES)
+    final = consolidate(results)
 
     return final, any_success
 
 
-def send_email(summary, nb_articles, ai_ok):
+def send_email(summary_html, nb_articles, ai_ok):
     msg = MIMEMultipart()
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = RECIPIENT_EMAIL
     date_str = datetime.utcnow().strftime("%d/%m/%Y")
     tag = "" if ai_ok else " [resume brut]"
     msg["Subject"] = f"Veille radiologie interventionnelle - {nb_articles} article(s) - {date_str}{tag}"
-    msg.attach(MIMEText(summary, "plain", "utf-8"))
+
+    full_html = f"""\
+<html>
+<body style="font-family: Arial, Helvetica, sans-serif; max-width: 700px;
+             margin: 0 auto; color: #222; line-height: 1.5;">
+  <h1 style="font-size: 20px; color: #333; border-bottom: 3px solid #333;
+             padding-bottom: 8px;">
+    Veille radiologie interventionnelle vasculaire - {date_str}
+  </h1>
+  <p style="color:#777; font-size: 13px;">{nb_articles} article(s) trouve(s) sur la periode.</p>
+  {summary_html}
+</body>
+</html>
+"""
+
+    msg.attach(MIMEText(full_html, "html", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
